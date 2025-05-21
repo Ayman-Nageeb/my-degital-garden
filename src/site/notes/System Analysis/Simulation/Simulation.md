@@ -71,59 +71,81 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
-    participant HTTP Handler
-    participant Facade Layer
-    participant Game Flow Service
-    participant Overlord Service
-    participant History Service
-    participant RNG Service
-    participant Spin Factory
+    participant Handler as Game Flow Handler
+    participant Facade
+    participant GameFlow as Game Flow Service
+    participant History as History Service
+    participant Overlord
+    participant DB as History DB
+    participant IP2Country
 
-    Client->>HTTP Handler: POST /core/wager
-    Note over Client,HTTP Handler: Payload: {session_token, wager, freespin_id, engine_params}
+    Client->>Handler: POST /core/spin_indexes/update
+    Note over Client,Handler: Payload: {session_token, restoring_indexes, record_id}
 
-    HTTP Handler->>HTTP Handler: Validate Request
-    HTTP Handler->>HTTP Handler: Parse Player Metadata
-    Note over HTTP Handler: {IP, UserAgent, Host}
+    %% Request Validation
+    Handler->>Handler: Validate Request
+    Handler->>Handler: Get Metadata
+    Handler->>Facade: UpdateSpinIndexes()
 
-    HTTP Handler->>Facade Layer: Wager(payload, metadata)
-    
-    Facade Layer->>Facade Layer: Validate Player Metadata
-    Facade Layer->>Facade Layer: Parse Request
-    
-    Facade Layer->>Game Flow Service: GameState(sessionToken)
-    Game Flow Service->>Overlord Service: GetStateBySessionToken
-    Overlord Service-->>Game Flow Service: Return State
-    Game Flow Service-->>Facade Layer: Return Game State
+    %% Facade Processing
+    Facade->>Facade: Validate Metadata
+    Facade->>Facade: Parse Request
+    Facade->>Facade: Check HistoryHandlingType
 
-    Facade Layer->>Facade Layer: Restore Game State
-    Facade Layer->>History Service: Check Previous State
-    History Service-->>Facade Layer: Return History
+    alt ParallelRestoring
+        Facade->>History: UpdateSpinIndexes()
+        History->>DB: GetByID()
+        DB-->>History: Spin Record
+        History->>History: Update RestoringIndexes
+        History->>DB: Update Record
+        DB-->>History: Updated Record
+        History-->>Facade: History Record
+        Facade-->>Handler: null balance
+    else SequentialRestoring
+        Facade->>GameFlow: UpdateRestoringIndexes()
+        GameFlow->>Overlord: GetStateBySessionToken()
+        Overlord-->>GameFlow: Game State
+        GameFlow->>History: lastRecord()
+        History->>DB: Get Last Record
+        DB-->>History: Spin Record
+        History-->>GameFlow: History Record
 
-    Facade Layer->>Game Flow Service: Wager(gameState, freeSpinID, wager, params)
-    
-    alt Free Spin
-        Game Flow Service->>Overlord Service: Validate Free Spin
-        Overlord Service-->>Game Flow Service: Free Spin Status
+        alt Record Can Be Updated
+            GameFlow->>GameFlow: Update RestoringIndexes
+            alt Need Bet Closing
+                GameFlow->>Overlord: CloseBet()
+                Overlord-->>GameFlow: Updated Balance
+            end
+            GameFlow->>History: update()
+            History->>DB: Update Record
+            DB-->>History: Updated Record
+            History-->>GameFlow: Updated Record
+            GameFlow-->>Facade: Updated Balance
+            Facade-->>Handler: Updated Balance
+        else Record Cannot Be Updated
+            GameFlow-->>Facade: Error
+            Facade-->>Handler: Error
+        end
     end
 
-    Game Flow Service->>Spin Factory: Generate Spin
-    Spin Factory->>RNG Service: Get Random Numbers
-    RNG Service-->>Spin Factory: Return Random Numbers
-    Spin Factory-->>Game Flow Service: Return Spin Result
+    %% Response Handling
+    alt Success
+        Handler-->>Client: 200 OK
+        Note over Handler,Client: {balance: number|null}
+    else Error
+        Handler-->>Client: Error Response
+        Note over Handler,Client: 400/401/422/409/500
+    end
 
-    Game Flow Service->>Game Flow Service: Calculate Award
-    
-    Game Flow Service->>Overlord Service: AtomicBet
-    Note over Game Flow Service,Overlord Service: {sessionToken, freeSpinID, roundID, wager, award}
-    Overlord Service-->>Game Flow Service: Return Bet Result
+    %% Additional Notes
+    Note over DB: MongoDB Indexes:
+    Note over DB: - created_at
+    Note over DB: - session_token
+    Note over DB: - internal_user_id
+    Note over DB: - game
+    Note over DB: - currency
 
-    Game Flow Service->>History Service: Create Record
-    History Service-->>Game Flow Service: Record Created
-
-    Game Flow Service-->>Facade Layer: Return Updated State
-    Facade Layer-->>HTTP Handler: Return Wager State
-    HTTP Handler-->>Client: Return Response
-
-    Note over Client,HTTP Handler: Response: {user_id, session_token, game, balance, game_results}
+    Note over IP2Country: Optional:
+    Note over IP2Country: Adds country info
+    Note over IP2Country: to spin records
 ```
